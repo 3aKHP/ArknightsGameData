@@ -1,0 +1,175 @@
+name: Sync Upstream and Release
+
+on:
+  schedule:
+    # Run daily at UTC 04:10, shortly after the story-data mirror.
+    - cron: '10 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get upstream latest commit SHA
+        id: upstream
+        run: |
+          UPSTREAM_SHA=$(git ls-remote https://github.com/Kengxxiao/ArknightsGameData.git refs/heads/master | cut -f1)
+          echo "sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${UPSTREAM_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "tag=upstream-${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Upstream SHA: ${UPSTREAM_SHA}"
+
+      - name: Get latest release tag from this fork
+        id: latest_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName // ""')
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Latest release tag: ${TAG}"
+
+      - name: Check if update is needed
+        id: check
+        run: |
+          UPSTREAM_SHA="${{ steps.upstream.outputs.sha }}"
+          LATEST_TAG="${{ steps.latest_release.outputs.tag }}"
+          LATEST_SHA="${LATEST_TAG#upstream-}"
+          if [ "${LATEST_SHA}" = "${UPSTREAM_SHA}" ]; then
+            echo "No update needed: fork release tag matches upstream SHA."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Update needed: upstream=${UPSTREAM_SHA}, latest_release_sha=${LATEST_SHA}"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch upstream selected data via sparse checkout
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          git remote add upstream https://github.com/Kengxxiao/ArknightsGameData.git
+          git fetch upstream master --depth=1
+
+          mkdir -p /tmp/upstream-data
+          git --work-tree=/tmp/upstream-data checkout upstream/master -- \
+            zh_CN/gamedata/excel \
+            zh_CN/gamedata/levels \
+            zh_CN/resource_manifest_idx.json
+
+          echo "Fetched upstream data:"
+          du -sh /tmp/upstream-data/zh_CN/gamedata/excel || true
+          du -sh /tmp/upstream-data/zh_CN/gamedata/levels || true
+          ls -lh /tmp/upstream-data/zh_CN/resource_manifest_idx.json || true
+
+      - name: Create release assets
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp/upstream-data
+
+          zip -qr /tmp/zh_CN-excel.zip zh_CN/gamedata/excel
+          zip -qr /tmp/zh_CN-levels.zip zh_CN/gamedata/levels
+          zip -q /tmp/zh_CN-resource-manifest.zip zh_CN/resource_manifest_idx.json
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          upstream_sha = os.environ['UPSTREAM_SHA']
+          source_root = Path('/tmp/upstream-data')
+          assets = [
+              Path('/tmp/zh_CN-excel.zip'),
+              Path('/tmp/zh_CN-levels.zip'),
+              Path('/tmp/zh_CN-resource-manifest.zip'),
+          ]
+
+          def sha256(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open('rb') as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def count_files(path: Path) -> int:
+              return sum(1 for p in path.rglob('*') if p.is_file())
+
+          manifest = {
+              'schema_version': 1,
+              'source': 'Kengxxiao/ArknightsGameData',
+              'source_branch': 'master',
+              'upstream_commit': upstream_sha,
+              'region': 'zh_CN',
+              'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+              'archives': {
+                  asset.name: {
+                      'sha256': sha256(asset),
+                      'size_bytes': asset.stat().st_size,
+                  }
+                  for asset in assets
+              },
+              'contents': {
+                  'zh_CN-excel.zip': {
+                      'root': 'zh_CN/gamedata/excel',
+                      'file_count': count_files(source_root / 'zh_CN/gamedata/excel'),
+                  },
+                  'zh_CN-levels.zip': {
+                      'root': 'zh_CN/gamedata/levels',
+                      'file_count': count_files(source_root / 'zh_CN/gamedata/levels'),
+                  },
+                  'zh_CN-resource-manifest.zip': {
+                      'root': 'zh_CN/resource_manifest_idx.json',
+                      'file_count': 1,
+                  },
+              },
+          }
+          Path('/tmp/manifest.json').write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+          echo "Created assets:"
+          ls -lh /tmp/zh_CN-excel.zip /tmp/zh_CN-levels.zip /tmp/zh_CN-resource-manifest.zip /tmp/manifest.json
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+
+      - name: Create GitHub Release and upload assets
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_SHA="${{ steps.upstream.outputs.sha }}"
+          RELEASE_TAG="${{ steps.upstream.outputs.tag }}"
+          RELEASE_DATE=$(date -u +%Y-%m-%d)
+          RELEASE_NAME="Game Data ${RELEASE_DATE}"
+
+          cat > /tmp/release_notes.md <<EOF
+          Upstream commit: `${UPSTREAM_SHA}`
+
+          Synced from [Kengxxiao/ArknightsGameData](https://github.com/Kengxxiao/ArknightsGameData) on ${RELEASE_DATE}.
+
+          This release contains selected `zh_CN/` game data archives:
+
+          - `zh_CN-excel.zip` — `zh_CN/gamedata/excel/`
+          - `zh_CN-levels.zip` — `zh_CN/gamedata/levels/`
+          - `zh_CN-resource-manifest.zip` — `zh_CN/resource_manifest_idx.json`
+          - `manifest.json` — release metadata and SHA-256 checksums
+          EOF
+
+          gh release create "${RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${RELEASE_NAME}" \
+            --notes-file /tmp/release_notes.md \
+            /tmp/zh_CN-excel.zip \
+            /tmp/zh_CN-levels.zip \
+            /tmp/zh_CN-resource-manifest.zip \
+            /tmp/manifest.json

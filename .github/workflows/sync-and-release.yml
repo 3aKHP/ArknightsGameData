@@ -50,17 +50,18 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch upstream selected data via sparse checkout
+      - name: Fetch upstream selected data
         if: steps.check.outputs.needed == 'true'
         run: |
           git remote add upstream https://github.com/Kengxxiao/ArknightsGameData.git
           git fetch upstream master --depth=1
 
           mkdir -p /tmp/upstream-data
-          git --work-tree=/tmp/upstream-data checkout upstream/master -- \
+          git archive upstream/master \
             zh_CN/gamedata/excel \
             zh_CN/gamedata/levels \
-            zh_CN/resource_manifest_idx.json
+            zh_CN/resource_manifest_idx.json \
+            | tar -x -C /tmp/upstream-data
 
           echo "Fetched upstream data:"
           du -sh /tmp/upstream-data/zh_CN/gamedata/excel || true
@@ -153,16 +154,16 @@ jobs:
           RELEASE_NAME="Game Data ${RELEASE_DATE}"
 
           cat > /tmp/release_notes.md <<EOF
-          Upstream commit: `${UPSTREAM_SHA}`
+          Upstream commit: ${UPSTREAM_SHA}
 
           Synced from [Kengxxiao/ArknightsGameData](https://github.com/Kengxxiao/ArknightsGameData) on ${RELEASE_DATE}.
 
-          This release contains selected `zh_CN/` game data archives:
+          This release contains selected zh_CN game data archives:
 
-          - `zh_CN-excel.zip` — `zh_CN/gamedata/excel/`
-          - `zh_CN-levels.zip` — `zh_CN/gamedata/levels/`
-          - `zh_CN-resource-manifest.zip` — `zh_CN/resource_manifest_idx.json`
-          - `manifest.json` — release metadata and SHA-256 checksums
+          - zh_CN-excel.zip: zh_CN/gamedata/excel/
+          - zh_CN-levels.zip: zh_CN/gamedata/levels/
+          - zh_CN-resource-manifest.zip: zh_CN/resource_manifest_idx.json
+          - manifest.json: release metadata and SHA-256 checksums
           EOF
 
           gh release create "${RELEASE_TAG}" \

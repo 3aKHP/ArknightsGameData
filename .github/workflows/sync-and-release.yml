@@ -2,8 +2,10 @@ name: Sync Upstream and Release
 
 on:
   schedule:
-    # Run daily at UTC 04:10, shortly after the story-data mirror.
-    - cron: '10 4 * * *'
+    # A: catch major-version unpack (~06:15 CST). Story runs 10m earlier.
+    - cron: '40 0 * * *'  # 08:40 CST
+    # B: catch minor flash-update (~16:00 CST). Story runs 10m earlier.
+    - cron: '10 9 * * *'  # 17:10 CST
   workflow_dispatch:
 
 jobs:

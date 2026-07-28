@@ -7,6 +7,16 @@ on:
     # B: catch minor flash-update (~16:00 CST). Story runs 10m earlier.
     - cron: '10 9 * * *'  # 17:10 CST
   workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Rebuild the current upstream commit through the release gate"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: gamedata-release
+  cancel-in-progress: false
 
 jobs:
   check-and-release:
@@ -23,7 +33,12 @@ jobs:
       - name: Get upstream latest commit SHA
         id: upstream
         run: |
+          set -euo pipefail
           UPSTREAM_SHA=$(git ls-remote https://github.com/Kengxxiao/ArknightsGameData.git refs/heads/master | cut -f1)
+          if [[ ! "${UPSTREAM_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid upstream SHA: ${UPSTREAM_SHA:-<empty>}"
+            exit 1
+          fi
           echo "sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
           echo "sha_short=${UPSTREAM_SHA:0:7}" >> "$GITHUB_OUTPUT"
           echo "tag=upstream-${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
@@ -34,17 +49,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName // ""')
+          TAG=$(gh release list --repo "${{ github.repository }}" --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // ""')
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Latest release tag: ${TAG}"
+          mkdir -p /tmp/latest-release
+          if [ -n "${TAG}" ]; then
+            gh release download "${TAG}" --repo "${{ github.repository }}" \
+              --pattern manifest.json --dir /tmp/latest-release 2>/dev/null || true
+          fi
+          if [ -f /tmp/latest-release/manifest.json ]; then
+            RELEASE_SHA=$(python3 -c 'import json; print(json.load(open("/tmp/latest-release/manifest.json")).get("upstream_commit", ""))')
+          else
+            RELEASE_SHA="${TAG#upstream-}"
+            RELEASE_SHA="${RELEASE_SHA%-v2}"
+          fi
+          echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Latest release upstream SHA: ${RELEASE_SHA:-<none>}"
 
       - name: Check if update is needed
         id: check
         run: |
           UPSTREAM_SHA="${{ steps.upstream.outputs.sha }}"
-          LATEST_TAG="${{ steps.latest_release.outputs.tag }}"
-          LATEST_SHA="${LATEST_TAG#upstream-}"
-          if [ "${LATEST_SHA}" = "${UPSTREAM_SHA}" ]; then
+          LATEST_SHA="${{ steps.latest_release.outputs.sha }}"
+          FORCE_RELEASE="${{ github.event.inputs.force_release || 'false' }}"
+          if [ "${LATEST_SHA}" = "${UPSTREAM_SHA}" ] && [ "${FORCE_RELEASE}" != "true" ]; then
             echo "No update needed: fork release tag matches upstream SHA."
             echo "needed=false" >> "$GITHUB_OUTPUT"
           else
@@ -70,7 +98,7 @@ jobs:
           du -sh /tmp/upstream-data/zh_CN/gamedata/levels || true
           ls -lh /tmp/upstream-data/zh_CN/resource_manifest_idx.json || true
 
-      - name: Create release assets
+      - name: Create and validate release assets
         if: steps.check.outputs.needed == 'true'
         run: |
           set -euo pipefail
@@ -81,58 +109,16 @@ jobs:
           zip -q /tmp/zh_CN-resource-manifest.zip zh_CN/resource_manifest_idx.json
 
           python3 - <<'PY'
-          import hashlib
           import json
           import os
-          from datetime import datetime, timezone
           from pathlib import Path
 
           upstream_sha = os.environ['UPSTREAM_SHA']
-          source_root = Path('/tmp/upstream-data')
-          assets = [
-              Path('/tmp/zh_CN-excel.zip'),
-              Path('/tmp/zh_CN-levels.zip'),
-              Path('/tmp/zh_CN-resource-manifest.zip'),
-          ]
-
-          def sha256(path: Path) -> str:
-              h = hashlib.sha256()
-              with path.open('rb') as f:
-                  for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                      h.update(chunk)
-              return h.hexdigest()
-
-          def count_files(path: Path) -> int:
-              return sum(1 for p in path.rglob('*') if p.is_file())
-
           manifest = {
-              'schema_version': 1,
               'source': 'Kengxxiao/ArknightsGameData',
               'source_branch': 'master',
               'upstream_commit': upstream_sha,
               'region': 'zh_CN',
-              'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
-              'archives': {
-                  asset.name: {
-                      'sha256': sha256(asset),
-                      'size_bytes': asset.stat().st_size,
-                  }
-                  for asset in assets
-              },
-              'contents': {
-                  'zh_CN-excel.zip': {
-                      'root': 'zh_CN/gamedata/excel',
-                      'file_count': count_files(source_root / 'zh_CN/gamedata/excel'),
-                  },
-                  'zh_CN-levels.zip': {
-                      'root': 'zh_CN/gamedata/levels',
-                      'file_count': count_files(source_root / 'zh_CN/gamedata/levels'),
-                  },
-                  'zh_CN-resource-manifest.zip': {
-                      'root': 'zh_CN/resource_manifest_idx.json',
-                      'file_count': 1,
-                  },
-              },
           }
           Path('/tmp/manifest.json').write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2) + '\n',
@@ -140,18 +126,35 @@ jobs:
           )
           PY
 
+          PREVIOUS_ARGS=()
+          if [ -f /tmp/latest-release/manifest.json ]; then
+            PREVIOUS_ARGS=(--previous-manifest /tmp/latest-release/manifest.json)
+          fi
+          python3 scripts/release_gate.py finalize \
+            --excel /tmp/zh_CN-excel.zip \
+            --levels /tmp/zh_CN-levels.zip \
+            --resource /tmp/zh_CN-resource-manifest.zip \
+            --manifest /tmp/manifest.json \
+            "${PREVIOUS_ARGS[@]}"
+          python3 scripts/release_gate.py verify \
+            --excel /tmp/zh_CN-excel.zip \
+            --levels /tmp/zh_CN-levels.zip \
+            --resource /tmp/zh_CN-resource-manifest.zip \
+            --manifest /tmp/manifest.json \
+            "${PREVIOUS_ARGS[@]}"
+
           echo "Created assets:"
           ls -lh /tmp/zh_CN-excel.zip /tmp/zh_CN-levels.zip /tmp/zh_CN-resource-manifest.zip /tmp/manifest.json
         env:
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
 
-      - name: Create GitHub Release and upload assets
+      - name: Stage, verify, and publish GitHub Release
         if: steps.check.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           UPSTREAM_SHA="${{ steps.upstream.outputs.sha }}"
-          RELEASE_TAG="${{ steps.upstream.outputs.tag }}"
+          RELEASE_TAG="${{ steps.upstream.outputs.tag }}-v2"
           RELEASE_DATE=$(date -u +%Y-%m-%d)
           RELEASE_NAME="Game Data ${RELEASE_DATE}"
 
@@ -168,11 +171,36 @@ jobs:
           - manifest.json: release metadata and SHA-256 checksums
           EOF
 
+          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)
+            if [ "${IS_DRAFT}" != "true" ]; then
+              echo "Published release ${RELEASE_TAG} already exists; skipping create."
+              exit 0
+            fi
+            gh release delete "${RELEASE_TAG}" --repo "${{ github.repository }}" --yes --cleanup-tag
+          fi
+
           gh release create "${RELEASE_TAG}" \
             --repo "${{ github.repository }}" \
+            --draft \
             --title "${RELEASE_NAME}" \
             --notes-file /tmp/release_notes.md \
             /tmp/zh_CN-excel.zip \
             /tmp/zh_CN-levels.zip \
             /tmp/zh_CN-resource-manifest.zip \
             /tmp/manifest.json
+
+          rm -rf /tmp/release-verify
+          mkdir -p /tmp/release-verify
+          gh release download "${RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --dir /tmp/release-verify
+          python3 scripts/release_gate.py verify \
+            --excel /tmp/release-verify/zh_CN-excel.zip \
+            --levels /tmp/release-verify/zh_CN-levels.zip \
+            --resource /tmp/release-verify/zh_CN-resource-manifest.zip \
+            --manifest /tmp/release-verify/manifest.json
+          gh release edit "${RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --draft=false \
+            --latest

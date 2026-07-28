@@ -130,13 +130,13 @@ jobs:
           if [ -f /tmp/latest-release/manifest.json ]; then
             PREVIOUS_ARGS=(--previous-manifest /tmp/latest-release/manifest.json)
           fi
-          python3 scripts/release_gate.py finalize \
+          python3 "$GITHUB_WORKSPACE/scripts/release_gate.py" finalize \
             --excel /tmp/zh_CN-excel.zip \
             --levels /tmp/zh_CN-levels.zip \
             --resource /tmp/zh_CN-resource-manifest.zip \
             --manifest /tmp/manifest.json \
             "${PREVIOUS_ARGS[@]}"
-          python3 scripts/release_gate.py verify \
+          python3 "$GITHUB_WORKSPACE/scripts/release_gate.py" verify \
             --excel /tmp/zh_CN-excel.zip \
             --levels /tmp/zh_CN-levels.zip \
             --resource /tmp/zh_CN-resource-manifest.zip \
@@ -199,7 +199,8 @@ jobs:
             --excel /tmp/release-verify/zh_CN-excel.zip \
             --levels /tmp/release-verify/zh_CN-levels.zip \
             --resource /tmp/release-verify/zh_CN-resource-manifest.zip \
-            --manifest /tmp/release-verify/manifest.json
+            --manifest /tmp/release-verify/manifest.json \
+            --previous-manifest /tmp/latest-release/manifest.json
           gh release edit "${RELEASE_TAG}" \
             --repo "${{ github.repository }}" \
             --draft=false \

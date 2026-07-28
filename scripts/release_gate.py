@@ -51,8 +51,12 @@ def sha256_file(path: Path) -> str:
 
 def _load_json(data: bytes, name: str) -> Any:
     try:
-        return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"invalid UTF-8 in entry {name}: {exc}") from exc
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON entry {name}: {exc}") from exc
 
 
@@ -89,10 +93,13 @@ def inspect_release(
     resource_zip: Path,
 ) -> dict[str, int]:
     """Validate all JSON plus PRTS consumer tables and return release metrics."""
-    excel, excel_names = _validated_archive(excel_zip)
-    levels, level_names = _validated_archive(levels_zip)
-    resource, resource_names = _validated_archive(resource_zip)
+    excel: ZipFile | None = None
+    levels: ZipFile | None = None
+    resource: ZipFile | None = None
     try:
+        excel, excel_names = _validated_archive(excel_zip)
+        levels, level_names = _validated_archive(levels_zip)
+        resource, resource_names = _validated_archive(resource_zip)
         required = [f"{EXCEL_ROOT}/{name}" for name in REQUIRED_EXCEL]
         missing = [name for name in required if name not in excel_names]
         if missing:
@@ -145,9 +152,12 @@ def inspect_release(
             "level_json_files": len(level_data),
         }
     finally:
-        excel.close()
-        levels.close()
-        resource.close()
+        if excel is not None:
+            excel.close()
+        if levels is not None:
+            levels.close()
+        if resource is not None:
+            resource.close()
 
     for field, minimum in MINIMUM_COUNTS.items():
         if metrics[field] < minimum:

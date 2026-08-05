@@ -69,7 +69,7 @@ class ReleaseGateTests(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.manifest = self.root / "manifest.json"
         self.manifest.write_text(
-            '{"source":"Kengxxiao/ArknightsGameData","upstream_commit":"abc"}\n',
+            '{"source":"3aKHP/arknights-data-pipeline","source_version_id":"abc"}\n',
             encoding="utf-8",
         )
         self.minimums = patch(
@@ -243,6 +243,20 @@ class ReleaseGateTests(unittest.TestCase):
                 manifest_path=self.manifest,
                 previous_manifest=previous,
             )
+
+    def test_finalize_and_verify_without_resource_zip(self) -> None:
+        excel, levels, _ = write_assets(self.root)
+        manifest = finalize_manifest(
+            excel_zip=excel,
+            levels_zip=levels,
+            manifest_path=self.manifest,
+        )
+        self.assertNotIn("zh_CN-resource-manifest.zip", manifest["archives"])
+        verify_manifest(
+            excel_zip=excel,
+            levels_zip=levels,
+            manifest_path=self.manifest,
+        )
 
 
 if __name__ == "__main__":

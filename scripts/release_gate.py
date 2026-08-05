@@ -87,6 +87,21 @@ def _object_count(value: Any, field: str, name: str) -> int:
     return len(nested)
 
 
+def _enemy_count(value: Any) -> int:
+    """Count enemies from enemy_database.json.
+
+    Handles both the legacy Kengxxiao layout ``{"enemies": [...]}`` and the
+    AKDP flat layout ``{enemy_id: [...], ...}`` where each top-level key is
+    an enemy.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("enemy_database must be a JSON object")
+    enemies = value.get("enemies")
+    if isinstance(enemies, (dict, list)):
+        return len(enemies)
+    return len(value)
+
+
 def inspect_release(
     excel_zip: Path,
     levels_zip: Path,
@@ -150,9 +165,7 @@ def inspect_release(
                 "enemy_handbook_table",
             ),
             "story_events": len(story_review),
-            "battle_enemies": _object_count(
-                level_data[ENEMY_DATABASE], "enemies", "enemy_database"
-            ),
+            "battle_enemies": _enemy_count(level_data[ENEMY_DATABASE]),
             "excel_json_files": len(excel_data),
             "level_json_files": len(level_data),
         }

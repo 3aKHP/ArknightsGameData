@@ -90,24 +90,30 @@ def _object_count(value: Any, field: str, name: str) -> int:
 def inspect_release(
     excel_zip: Path,
     levels_zip: Path,
-    resource_zip: Path,
+    resource_zip: Path | None = None,
 ) -> dict[str, int]:
-    """Validate all JSON plus PRTS consumer tables and return release metrics."""
+    """Validate all JSON plus PRTS consumer tables and return release metrics.
+
+    ``resource_zip`` is optional: when omitted, only the Excel and levels
+    archives that LTS actually consumes are validated.
+    """
     excel: ZipFile | None = None
     levels: ZipFile | None = None
     resource: ZipFile | None = None
     try:
         excel, excel_names = _validated_archive(excel_zip)
         levels, level_names = _validated_archive(levels_zip)
-        resource, resource_names = _validated_archive(resource_zip)
         required = [f"{EXCEL_ROOT}/{name}" for name in REQUIRED_EXCEL]
         missing = [name for name in required if name not in excel_names]
         if missing:
             raise ValueError(f"excel archive missing required entries: {missing}")
         if ENEMY_DATABASE not in level_names:
             raise ValueError(f"levels archive missing {ENEMY_DATABASE}")
-        if RESOURCE_MANIFEST not in resource_names:
-            raise ValueError(f"resource archive missing {RESOURCE_MANIFEST}")
+        if resource_zip is not None:
+            resource, resource_names = _validated_archive(resource_zip)
+            if RESOURCE_MANIFEST not in resource_names:
+                raise ValueError(f"resource archive missing {RESOURCE_MANIFEST}")
+            _load_json(resource.read(RESOURCE_MANIFEST), RESOURCE_MANIFEST)
 
         excel_data: dict[str, Any] = {}
         for name in excel_names:
@@ -117,7 +123,6 @@ def inspect_release(
         for name in level_names:
             if name.endswith(".json"):
                 level_data[name] = _load_json(levels.read(name), name)
-        _load_json(resource.read(RESOURCE_MANIFEST), RESOURCE_MANIFEST)
 
         characters = excel_data[f"{EXCEL_ROOT}/character_table.json"]
         story_review = excel_data[f"{EXCEL_ROOT}/story_review_table.json"]
@@ -196,7 +201,7 @@ def finalize_manifest(
     *,
     excel_zip: Path,
     levels_zip: Path,
-    resource_zip: Path,
+    resource_zip: Path | None = None,
     manifest_path: Path,
     previous_manifest: Path | None = None,
 ) -> dict[str, Any]:
@@ -204,16 +209,18 @@ def finalize_manifest(
     previous = _load_manifest(previous_manifest) if previous_manifest and previous_manifest.is_file() else None
     metrics = inspect_release(excel_zip, levels_zip, resource_zip)
     check_regression(metrics, previous)
+    archives: dict[str, dict[str, int | str]] = {
+        excel_zip.name: _asset_record(excel_zip),
+        levels_zip.name: _asset_record(levels_zip),
+    }
+    if resource_zip is not None:
+        archives[resource_zip.name] = _asset_record(resource_zip)
     manifest.update(
         {
             "schema_version": 2,
             "contract_version": CONTRACT_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "archives": {
-                excel_zip.name: _asset_record(excel_zip),
-                levels_zip.name: _asset_record(levels_zip),
-                resource_zip.name: _asset_record(resource_zip),
-            },
+            "archives": archives,
             "metrics": metrics,
         }
     )
@@ -228,7 +235,7 @@ def verify_manifest(
     *,
     excel_zip: Path,
     levels_zip: Path,
-    resource_zip: Path,
+    resource_zip: Path | None = None,
     manifest_path: Path,
     previous_manifest: Path | None = None,
 ) -> None:
@@ -243,7 +250,10 @@ def verify_manifest(
     archives = manifest.get("archives")
     if not isinstance(archives, dict):
         raise ValueError("manifest archives must be an object")
-    for path in (excel_zip, levels_zip, resource_zip):
+    asset_paths = [excel_zip, levels_zip]
+    if resource_zip is not None:
+        asset_paths.append(resource_zip)
+    for path in asset_paths:
         actual = _asset_record(path)
         if archives.get(path.name) != actual:
             raise ValueError(f"manifest record for {path.name} does not match asset")
@@ -258,7 +268,7 @@ def main() -> None:
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--excel", type=Path, required=True)
         subparser.add_argument("--levels", type=Path, required=True)
-        subparser.add_argument("--resource", type=Path, required=True)
+        subparser.add_argument("--resource", type=Path)
         subparser.add_argument("--manifest", type=Path, required=True)
         subparser.add_argument("--previous-manifest", type=Path)
     args = parser.parse_args()

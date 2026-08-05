@@ -167,6 +167,18 @@ class ReleaseGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     inspect_release(excel, levels, resource)
 
+    def test_akdp_flat_enemy_database_layout(self) -> None:
+        """AKDP produces {enemy_id: [...]} without an 'enemies' wrapper."""
+        excel, levels, resource = write_assets(self.root)
+        # Rewrite levels with AKDP flat enemy_database layout.
+        with ZipFile(levels, "w", compression=ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "zh_CN/gamedata/levels/enemydata/enemy_database.json",
+                json.dumps({"enemy_001": [{}], "enemy_002": [{}]}),
+            )
+        metrics = inspect_release(excel, levels, resource)
+        self.assertEqual(metrics["battle_enemies"], 2)
+
     def test_non_object_character_entry_is_rejected(self) -> None:
         excel, levels, resource = write_assets(self.root, character_record="invalid")
         with self.assertRaisesRegex(ValueError, "character_table entries"):
